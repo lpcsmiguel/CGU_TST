@@ -87,7 +87,8 @@ async def naive_rag(request: RAGRequest):
 @app.post("/classificar-texto", response_model=ClassificationResponse, tags=["3. Classificação de Texto"])
 async def classificar_texto(request: ClassificationRequest):
     """
-    Endpoint de Classificação de Texto    """
+    Endpoint de Classificação de Texto
+    """
     print(f"Simulação: Sentença recebida para classificação: {request.sentenca}")
 
     classificacao_simulada = "Positivo"
