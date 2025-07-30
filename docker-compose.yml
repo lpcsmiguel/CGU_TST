@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  #--- Gateway da API ---
+  ###### Gateway da API #####
   api_gateway:
     build: ./services/api_gateway
     container_name: api_gateway
@@ -9,16 +9,50 @@ services:
       - "8000:8000"
     volumes:
       - ./services/api_gateway:/app
-    env_file:
-      - ./.env
+    environment:
+      - BROKER_URL=amqp://guest:guest@rabbitmq:5672/
     depends_on:
       - rabbitmq
-
-
-  #--- Fila de Mensagens ---
+  ######Processaodor de documentos PDF #####
+  doc_processor:
+    build: ./services/doc_processor
+    container_name: doc_processor
+    volumes:
+      - ./services/doc_processor:/app
+    environment:
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - rabbitmq
+      - chromadb 
+ # Serviço de RAG e classificação de sentimentos
+  ai_service:
+    build: ./services/ai_service
+    container_name: ai_service
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./services/ai_service:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - rabbitmq
+      - chromadb
+  ###### Fila de Mensagens #####
   rabbitmq:
     image: rabbitmq:3.12-management
     container_name: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
+
+  chromadb:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: chromadb
+    ports:
+      - "8002:8000" # Expondo a porta do Chroma na 8002 
+    volumes:
+      - chroma_data:/chroma/.chroma/index # Volume para persistir os dados
+
+volumes:
+  chroma_data:

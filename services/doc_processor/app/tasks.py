@@ -1,8 +1,10 @@
 import os
 import io
+import uuid
 from celery import Celery
-import pydpdf
+import pypdf
 from openai import OpenAI
+import chromadb
 
 # ##### Configuração do Celery #####
 broker_url = os.environ.get("CELERY_BROKER_URL", "amqp://guest:guest@rabbitmq:5672/")
@@ -12,7 +14,11 @@ celery_app = Celery("tasks", broker=broker_url)
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY não encontrada nas variáveis de ambiente.")
-client = OpenAI(api_key=api_key)
+client_openai = OpenAI(api_key=api_key)
+
+# ##### Configuração do Cliente ChromaDB #####
+# Conecta ao serviço ChromaDB que está rodando via Docker na rede interna
+client_chroma = chromadb.HttpClient(host='chromadb', port=8000)
 
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -32,10 +38,7 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
 @celery_app.task
 def process_document_task(user_id: str, file_content_bytes: bytes, chunk_size: int, chunk_overlap: int, file_name: str):
     """
-    Tarefa Celery para processar um documento:
-    1. Lê o texto de um PDF em bytes.
-    2. Divide o texto em chunks.
-    3. Gera embeddings para cada chunk usando a API da OpenAI.
+    Tarefa Celery para processar e armazenar um documento.
     """
     print(f"##### Iniciando processamento para user_id: {user_id}, arquivo: {file_name} #####")
 
@@ -52,7 +55,7 @@ def process_document_task(user_id: str, file_content_bytes: bytes, chunk_size: i
 
         # 3. Gerar embeddings para cada chunk
         print("Enviando chunks para a API da OpenAI...")
-        response = client.embeddings.create(
+        response = client_openai.embeddings.create(
             input=text_chunks,
             model="text-embedding-3-small"
         )
@@ -60,8 +63,25 @@ def process_document_task(user_id: str, file_content_bytes: bytes, chunk_size: i
         embeddings = [embedding_item.embedding for embedding_item in response.data]
         
         print(f"Embeddings gerados com sucesso! Total de vetores: {len(embeddings)}")
+
+        # 4. Armazenar chunks e embeddings no ChromaDB
+        print("Iniciando armazenamento no ChromaDB...")
+        collection_name = f"user_{user_id}_docs"
+        collection = client_chroma.get_or_create_collection(name=collection_name)
         
-        return f"Arquivo {file_name} do usuário {user_id} processado com sucesso. {len(text_chunks)} chunks gerados."
+        # Gera IDs únicos e metadados para cada chunk a ser armazenado
+        ids = [str(uuid.uuid4()) for _ in text_chunks]
+        metadatas = [{"source_file": file_name} for _ in text_chunks]
+
+        collection.add(
+            embeddings=embeddings,
+            documents=text_chunks,
+            metadatas=metadatas,
+            ids=ids
+        )
+        print(f"Dados armazenados com sucesso na coleção '{collection_name}'.")
+        
+        return f"Arquivo {file_name} do usuário {user_id} processado e ARMAZENADO com sucesso."
 
     except Exception as e:
         print(f"ERRO durante o processamento para user_id {user_id}, arquivo {file_name}: {e}")

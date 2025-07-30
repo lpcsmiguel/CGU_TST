@@ -1,0 +1,4 @@
+celery
+pydpdf
+openai
+chromadb-client
