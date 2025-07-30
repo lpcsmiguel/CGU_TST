@@ -3,3 +3,4 @@ pydantic
 typing
 uvicorn[standard]
 python-multipart
+celery

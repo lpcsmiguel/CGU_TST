@@ -1,14 +1,19 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from celery import Celery
 
 # Cria a instância da aplicação FastAPI
-
 app = FastAPI(
     title="CGU - Teste Cientista de Dados - Miguel Cruz",
     description="API para processamento de documentos, RAG e classificação de texto.",
     version="0.1.0"
 )
+
+# ########### Config Celery ###########
+broker_url = "amqp://guest:guest@rabbitmq:5672/"
+celery_app = Celery("gateway_tasks", broker=broker_url)
+
 
 # ######## Modelos de Dados #########
 
@@ -46,6 +51,7 @@ class JobStatusResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED
 )
 async def processar_documentos(
+    user_id: str = Form(..., description="ID do usuário para isolar os dados."),
     arquivos: List[UploadFile] = File(..., description="Um ou mais arquivos PDF para processar."),
     chunk_size: int = Form(1000, description="Tamanho dos chunks de texto."),
     chunk_overlap: int = Form(200, description="Sobreposição entre os chunks.")
@@ -61,14 +67,21 @@ async def processar_documentos(
             detail="Todos os arquivos devem ser do tipo PDF."
         )
 
-    job_id = "job_12345"
-    print(f"Simulação: Arquivos recebidos: {[f.filename for f in arquivos]}")
-    print(f"Simulação: Parâmetros: size={chunk_size}, overlap={chunk_overlap}")
+    task_ids = []
+    for arquivo in arquivos:
+        file_content_bytes = await arquivo.read()
+        
+        task = celery_app.send_task(
+            'app.tasks.process_document_task',
+            args=[user_id, file_content_bytes, chunk_size, chunk_overlap, arquivo.filename]
+        )
+        task_ids.append(task.id)
+        print(f"Arquivo '{arquivo.filename}' do usuário '{user_id}' enviado para processamento com o Job ID: {task.id}")
 
     return JobStatusResponse(
-        job_id=job_id,
+        job_id=str(task_ids),
         status="enfileirado",
-        detalhes="O processamento foi iniciado em background."
+        detalhes=f"{len(task_ids)} documentos do usuário '{user_id}' foram enviados para a fila de processamento."
     )
 
 
