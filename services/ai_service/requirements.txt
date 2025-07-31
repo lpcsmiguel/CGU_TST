@@ -3,3 +3,6 @@ uvicorn[standard]
 openai
 chromadb-client
 httpx
+langchain
+langchain-openai
+langchain-community
