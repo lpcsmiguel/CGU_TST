@@ -1,35 +1,34 @@
 import os
-from enum import Enum
 import json
+from enum import Enum
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from openai import OpenAI
 import chromadb
 
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser, PydanticToolsParser
 
 # ##### Configurações #####
 api_key = os.environ.get("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY não encontrada nas variáveis de ambiente.")
 
-client_openai = OpenAI(api_key=api_key)
-client_chroma = chromadb.HttpClient(host='chromadb', port=8000)
-
 app = FastAPI(
-    title="AI Service",
-    description="Serviço para realizar RAG e outras tarefas de IA.",
-    version="1.0.0"
+    title="AI Service com LangChain",
+    description="Serviço para realizar RAG e outras tarefas de IA usando LangChain.",
+    version="2.0.0"
 )
 
 # ######## Modelos de Dados #########
 class RAGRequest(BaseModel):
-    """Modelo para a requisição do endpoint RAG."""
     user_id: str = Field(..., description="ID do usuário para buscar em sua coleção de documentos.")
     pergunta: str = Field(..., description="Pergunta a ser respondida.")
     aplicar_reranking_bm25: bool = Field(default=False, description="Opcional: Aplicar reranking com BM25.")
 
 class RAGResponse(BaseModel):
-    """Modelo para a resposta do endpoint RAG."""
     resposta: str
     chunks_utilizados: list[str]
 
@@ -39,74 +38,69 @@ class SentimentEnum(str, Enum):
     NEUTRO = "Neutro"
 
 class ClassificationRequest(BaseModel):
-    """Modelo para a requisição do endpoint de classificação."""
     sentenca: str = Field(..., description="Sentença a ser classificada.")
 
 class ClassificationResponse(BaseModel):
-    """Modelo para a resposta do endpoint de classificação."""
     classificacao: SentimentEnum
-    justificativa: str = "Classificação baseada na análise do modelo via Tool Calling."
+    justificativa: str = "Classificação baseada na análise do modelo via LangChain e Tool Calling."
 
 
-# ########### Endpoint RAG ###########
 @app.post("/rag/query", response_model=RAGResponse)
-async def executar_rag(request: RAGRequest):
+async def executar_rag_langchain(request: RAGRequest):
     """
-    Executa o processo de Retrieval-Augmented Generation (RAG).
+    Executa o processo de RAG usando uma chain do LangChain.
     """
-    print(f"##### Iniciando RAG para o usuário: {request.user_id} #####")
+    print(f"##### Iniciando RAG com LangChain para o usuário: {request.user_id} #####")
+
+    # 1. Inicializar os componentes do LangChain
+    llm = ChatOpenAI(model="gpt-3.5-turbo", openai_api_key=api_key)
+    embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
     
-    # 1. Obter a coleção de documentos do usuário
     collection_name = f"user_{request.user_id}_docs"
-    try:
-        collection = client_chroma.get_collection(name=collection_name)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nenhum documento encontrado para o usuário '{request.user_id}'. Faça o upload de documentos primeiro."
-        )
-
-    # 2. Gerar o embedding da pergunta do usuário
-    print(f"Gerando embedding para a pergunta: '{request.pergunta}'")
-    query_embedding = client_openai.embeddings.create(
-        input=[request.pergunta],
-        model="text-embedding-3-small"
-    ).data[0].embedding
-
-    # 3. Buscar no ChromaDB pelos chunks mais relevantes
-    retrieved_chunks = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=5 # Buscar os 5 chunks mais próximos
-    )
     
-    context_chunks = retrieved_chunks['documents'][0]
-    print(f"Chunks recuperados do ChromaDB: {len(context_chunks)}")
+    # O LangChain se conecta diretamente ao ChromaDB
+    vectorstore = Chroma(
+        collection_name=collection_name,
+        embedding_function=embeddings_model,
+        client=chromadb.HttpClient(host='chromadb', port=8000)
+    )
+    # Cria um "retriever" que busca os documentos relevantes
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
-    # 4. Construir o prompt para o LLM com o contexto encontrado
-    contexto = "\n\n".join(context_chunks)
-    prompt = f"""
+    # 2. Definir o template do prompt
+    prompt_template = """
     Com base no contexto abaixo, responda à pergunta do usuário de forma concisa.
     Se a resposta não estiver no contexto, diga "Não encontrei informações sobre isso nos documentos fornecidos".
 
     Contexto:
     ---
-    {contexto}
+    {context}
     ---
 
-    Pergunta: {request.pergunta}
+    Pergunta: {question}
     """
+    prompt = ChatPromptTemplate.from_template(prompt_template)
 
-    # 5. Chamar o LLM para gerar a resposta
-    print("Enviando prompt para o modelo de chat da OpenAI...")
-    chat_completion = client_openai.chat.completions.create(
-        messages=[
-            {"role": "system", "content": "Você é um assistente prestativo que responde perguntas com base em um contexto fornecido."},
-            {"role": "user", "content": prompt},
-        ],
-        model="gpt-3.5-turbo",
+    # Função para formatar os documentos recuperados
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    # 3. Construir a "chain" de RAG usando LangChain Expression Language (LCEL)
+    rag_chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
     )
+
+    # 4. Invocar a chain para obter a resposta
+    print("Invocando a RAG chain...")
+    resposta_final = rag_chain.invoke(request.pergunta)
     
-    resposta_final = chat_completion.choices[0].message.content
+    # Para obter os chunks, podemos chamar o retriever separadamente
+    docs_recuperados = retriever.invoke(request.pergunta)
+    context_chunks = [doc.page_content for doc in docs_recuperados]
+    
     print(f"Resposta gerada: {resposta_final}")
 
     return RAGResponse(
@@ -114,55 +108,32 @@ async def executar_rag(request: RAGRequest):
         chunks_utilizados=context_chunks
     )
 
+# ########### Endpoint de Classificação com LangChain ###########
+class SentimentTool(BaseModel):
+    """Define o sentimento de um texto."""
+    sentimento: SentimentEnum = Field(description="O sentimento identificado no texto, deve ser 'Positivo', 'Negativo' ou 'Neutro'.")
 
 @app.post("/text/classify", response_model=ClassificationResponse)
-async def classificar_texto(request: ClassificationRequest):
+async def classificar_texto_langchain(request: ClassificationRequest):
     """
-    Classifica o sentimento de uma sentença usando a abordagem de Tool Calling.
+    Classifica o sentimento usando o LLM com a ferramenta definida.
     """
-    print(f"##### Iniciando classificação para a sentença: '{request.sentenca}' #####")
+    print(f"##### Iniciando classificação com LangChain para a sentença: '{request.sentenca}' #####")
 
-    # Define a tool que a LLM é instruído a usar. Existem maneiras mais sofisticadas de definir a tool, ex: annotator + funções, mas essa é mais simples/rápida.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "definir_sentimento",
-                "description": "Define o sentimento de um texto como Positivo, Negativo ou Neutro.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "sentimento": {
-                            "type": "string",
-                            "description": "O sentimento identificado no texto.",
-                            "enum": ["Positivo", "Negativo", "Neutro"]
-                        }
-                    },
-                    "required": ["sentimento"]
-                }
-            }
-        }
-    ]
+    # 1. Inicializar o LLM e vincular a ferramenta a ele
+    llm = ChatOpenAI(model="gpt-3.5-turbo", openai_api_key=api_key)
+    llm_with_tool = llm.bind_tools(tools=[SentimentTool])
 
-    try:
-        completion = client_openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Você é um especialista em análise de sentimentos. Use a ferramenta 'definir_sentimento' para classificar o texto do usuário."},
-                {"role": "user", "content": request.sentenca}
-            ],
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "definir_sentimento"}} # Força o uso da ferramenta. 
-        )
+    # 2. Construir a chain de classificação
+    classification_chain = llm_with_tool | PydanticToolsParser(tools=[SentimentTool])
 
-        tool_call = completion.choices[0].message.tool_calls[0]
-        arguments = json.loads(tool_call.function.arguments)
-        classificacao_final = arguments["sentimento"]
-        
-        print(f"Sentença classificada como: {classificacao_final} via Tool Call.")
+    # 3. Invocar a chain
+    print("Invocando a classification chain...")
+    # O LangChain gerencia o prompt para nós ao usar a ferramenta
+    response_tool = classification_chain.invoke(request.sentenca)
+    
+    classificacao_final = response_tool[0].sentimento
 
-        return ClassificationResponse(classificacao=classificacao_final)
+    print(f"Sentença classificada como: {classificacao_final} via LangChain Tool.")
 
-    except Exception as e:
-        print(f"ERRO durante a classificação com Tool Calling: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro ao se comunicar com a API da OpenAI: {e}")
+    return ClassificationResponse(classificacao=classificacao_final)
