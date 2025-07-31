@@ -1,8 +1,11 @@
 import os
+from enum import Enum
+import json
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 from openai import OpenAI
 import chromadb
+
 
 # ##### Configurações #####
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -29,6 +32,21 @@ class RAGResponse(BaseModel):
     """Modelo para a resposta do endpoint RAG."""
     resposta: str
     chunks_utilizados: list[str]
+
+class SentimentEnum(str, Enum):
+    POSITIVO = "Positivo"
+    NEGATIVO = "Negativo"
+    NEUTRO = "Neutro"
+
+class ClassificationRequest(BaseModel):
+    """Modelo para a requisição do endpoint de classificação."""
+    sentenca: str = Field(..., description="Sentença a ser classificada.")
+
+class ClassificationResponse(BaseModel):
+    """Modelo para a resposta do endpoint de classificação."""
+    classificacao: SentimentEnum
+    justificativa: str = "Classificação baseada na análise do modelo via Tool Calling."
+
 
 # ########### Endpoint RAG ###########
 @app.post("/rag/query", response_model=RAGResponse)
@@ -95,3 +113,56 @@ async def executar_rag(request: RAGRequest):
         resposta=resposta_final,
         chunks_utilizados=context_chunks
     )
+
+
+@app.post("/text/classify", response_model=ClassificationResponse)
+async def classificar_texto(request: ClassificationRequest):
+    """
+    Classifica o sentimento de uma sentença usando a abordagem de Tool Calling.
+    """
+    print(f"##### Iniciando classificação para a sentença: '{request.sentenca}' #####")
+
+    # Define a tool que a LLM é instruído a usar. Existem maneiras mais sofisticadas de definir a tool, ex: annotator + funções, mas essa é mais simples/rápida.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "definir_sentimento",
+                "description": "Define o sentimento de um texto como Positivo, Negativo ou Neutro.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sentimento": {
+                            "type": "string",
+                            "description": "O sentimento identificado no texto.",
+                            "enum": ["Positivo", "Negativo", "Neutro"]
+                        }
+                    },
+                    "required": ["sentimento"]
+                }
+            }
+        }
+    ]
+
+    try:
+        completion = client_openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Você é um especialista em análise de sentimentos. Use a ferramenta 'definir_sentimento' para classificar o texto do usuário."},
+                {"role": "user", "content": request.sentenca}
+            ],
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "definir_sentimento"}} # Força o uso da ferramenta. 
+        )
+
+        tool_call = completion.choices[0].message.tool_calls[0]
+        arguments = json.loads(tool_call.function.arguments)
+        classificacao_final = arguments["sentimento"]
+        
+        print(f"Sentença classificada como: {classificacao_final} via Tool Call.")
+
+        return ClassificationResponse(classificacao=classificacao_final)
+
+    except Exception as e:
+        print(f"ERRO durante a classificação com Tool Calling: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao se comunicar com a API da OpenAI: {e}")

@@ -35,7 +35,7 @@ class ClassificationRequest(BaseModel):
 class ClassificationResponse(BaseModel):
     """Modelo para a resposta do endpoint de classificação."""
     classificacao: str
-    justificativa_logprobs: Optional[dict] = None
+    justificativa: str
 
 class JobStatusResponse(BaseModel):
     """Modelo para a resposta do status do job de processamento."""
@@ -107,14 +107,16 @@ async def rag(request: RAGRequest):
 @app.post("/classificar-texto", response_model=ClassificationResponse, tags=["3. Classificação de Texto"])
 async def classificar_texto(request: ClassificationRequest):
     """
-    Endpoint de Classificação de Texto
+    Endpoint de Classificação de Texto que atua como proxy para o ai_service.
     """
-    print(f"Simulação: Sentença recebida para classificação: {request.sentenca}")
-
-    classificacao_simulada = "Positivo"
-    logprobs_simulados = {"Positivo": -0.1, "Negativo": -2.5}
-
-    return ClassificationResponse(
-        classificacao=classificacao_simulada,
-        justificativa_logprobs=logprobs_simulados
-    )
+    ai_service_url = "http://ai_service:8000/text/classify"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(ai_service_url, json=request.dict(), timeout=30.0)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        detail = e.response.json().get('detail', 'Erro no serviço de classificação.')
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="O serviço de classificação está indisponível.")
