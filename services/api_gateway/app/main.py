@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from celery import Celery
+import httpx
 
 # Cria a instância da aplicação FastAPI
 app = FastAPI(
@@ -16,15 +17,16 @@ celery_app = Celery("gateway_tasks", broker=broker_url)
 
 
 # ######## Modelos de Dados #########
-
 class RAGRequest(BaseModel):
     """Modelo para a requisição do endpoint RAG."""
+    user_id: str = Field(..., description="ID do usuário para buscar em seus documentos.")
     pergunta: str = Field(..., description="Pergunta a ser respondida com base nos documentos.")
     aplicar_reranking_bm25: bool = Field(default=False, description="Opcional: Aplicar reranking com BM25.")
 
 class RAGResponse(BaseModel):
     """Modelo para a resposta do endpoint RAG."""
     resposta: str
+    chunks_utilizados: list[str]
 
 class ClassificationRequest(BaseModel):
     """Modelo para a requisição do endpoint de classificação."""
@@ -43,7 +45,6 @@ class JobStatusResponse(BaseModel):
 
 
 # ########### Endpoints da API  ##########
-
 @app.post(
     "/processar-documentos",
     tags=["1. Processamento de Documentos"],
@@ -84,17 +85,23 @@ async def processar_documentos(
         detalhes=f"{len(task_ids)} documentos do usuário '{user_id}' foram enviados para a fila de processamento."
     )
 
-
 @app.post("/rag", response_model=RAGResponse, tags=["2. RAG"])
-async def naive_rag(request: RAGRequest):
+async def rag(request: RAGRequest):
     """
-    Endpoint RAG
+    Endpoint RAG que atua como proxy para o ai_service.
     """
-    print(f"Simulação: Pergunta recebida: {request.pergunta}")
-    
-    resposta_simulada = f"Esta é uma resposta simulada para a pergunta: '{request.pergunta}'."
+    ai_service_url = "http://ai_service:8000/rag/query"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(ai_service_url, json=request.dict(), timeout=60.0)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        detail = e.response.json().get('detail', 'Erro no serviço de IA.')
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="O serviço de IA está indisponível ou demorou para responder.")
 
-    return RAGResponse(resposta=resposta_simulada)
 
 
 @app.post("/classificar-texto", response_model=ClassificationResponse, tags=["3. Classificação de Texto"])
